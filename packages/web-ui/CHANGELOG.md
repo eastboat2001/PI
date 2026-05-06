@@ -1,5 +1,19 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Added example-app local directory session mirroring through the browser File System Access API, including merged browser/local session listing and import of local-only sessions.
+
+### Changed
+
+- Updated the web-ui example app to restore the active or latest session on startup, persist the selected model across refreshes, and create new sessions without relying on a full page reload.
+
+### Fixed
+
+- Fixed example-app session persistence gaps that previously caused refreshes, new sessions, or delayed first saves to drop conversation state or revert the selected model.
+
 ## [0.73.0] - 2026-05-04
 
 ## [0.72.1] - 2026-05-02

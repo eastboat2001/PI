@@ -14,7 +14,6 @@ import {
 	ProviderKeysStore,
 	ProvidersModelsTab,
 	ProxyTab,
-	SessionListDialog,
 	SessionsStore,
 	SettingsDialog,
 	SettingsStore,
@@ -27,6 +26,10 @@ import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { createSystemNotification, customConvertToLlm, registerCustomMessageRenderers } from "./custom-messages.js";
+import { LocalSessionListDialog } from "./dialogs/LocalSessionListDialog.js";
+import { LocalSyncSettingsTab } from "./dialogs/LocalSyncSettingsTab.js";
+import { LocalSessionSync } from "./storage/local-session-sync.js";
+import { mergeSessionMetadata } from "./storage/merged-session-index.js";
 
 registerCustomMessageRenderers();
 
@@ -56,6 +59,7 @@ sessions.setBackend(backend);
 
 const storage = new AppStorage(settings, providerKeys, sessions, customProviders, backend);
 setAppStorage(storage);
+const localSync = new LocalSessionSync(settings);
 
 const DEFAULT_MODEL_PROVIDER = "anthropic";
 const DEFAULT_MODEL_ID = "claude-sonnet-4-5-20250929";
@@ -120,11 +124,16 @@ const getDefaultModel = async (): Promise<Model<any>> => {
 	if (storedModel && typeof storedModel === "object" && storedModel.id && storedModel.provider) {
 		return storedModel;
 	}
+	const localSettings = await localSync.readSettings();
+	if (localSettings?.selectedModel && typeof localSettings.selectedModel === "object") {
+		return localSettings.selectedModel;
+	}
 	return getModel(DEFAULT_MODEL_PROVIDER, DEFAULT_MODEL_ID);
 };
 
 const persistSelectedModel = async (model: Model<any>) => {
 	await storage.settings.set(SELECTED_MODEL_KEY, model);
+	await localSync.writeSettings({ currentSessionId, selectedModel: model });
 };
 
 const setCurrentSessionId = async (sessionId: string | undefined) => {
@@ -134,6 +143,7 @@ const setCurrentSessionId = async (sessionId: string | undefined) => {
 	} else {
 		await storage.settings.delete(CURRENT_SESSION_ID_KEY);
 	}
+	await localSync.writeSettings({ currentSessionId: sessionId, selectedModel: agent?.state.model });
 	updateUrl(sessionId);
 };
 
@@ -196,9 +206,49 @@ const saveSession = async () => {
 		};
 
 		await storage.sessions.save(sessionData, metadata);
+		await localSync.writeSession(sessionData, metadata);
 	} catch (err) {
 		console.error("Failed to save session:", err);
 	}
+};
+
+const loadLocalSession = async (sessionId: string): Promise<boolean> => {
+	const localRecord = await localSync.readSession(sessionId);
+	if (!localRecord) {
+		return false;
+	}
+	await storage.sessions.save(localRecord.data, localRecord.metadata);
+	await loadSession(sessionId);
+	return true;
+};
+
+const loadMergedSession = async (sessionId: string): Promise<boolean> => {
+	const browserSession = await storage.sessions.get(sessionId);
+	const localSession = await localSync.readSession(sessionId);
+	if (browserSession && localSession) {
+		if (localSession.data.lastModified > browserSession.lastModified) {
+			await storage.sessions.save(localSession.data, localSession.metadata);
+		}
+		return await loadSession(sessionId);
+	}
+	if (browserSession) {
+		return await loadSession(sessionId);
+	}
+	if (localSession) {
+		return await loadLocalSession(sessionId);
+	}
+	return false;
+};
+
+const getMergedSessions = async () => {
+	const browserSessions = await storage.sessions.getAllMetadata();
+	const localSessions = await localSync.listSessionMetadata();
+	return mergeSessionMetadata(browserSessions, localSessions);
+};
+
+const deleteMergedSession = async (sessionId: string) => {
+	await storage.sessions.deleteSession(sessionId);
+	await localSync.deleteSession(sessionId);
 };
 
 const handleAgentEvent = async (event: AgentEvent) => {
@@ -309,20 +359,35 @@ const restoreInitialSession = async () => {
 	const urlParams = new URLSearchParams(window.location.search);
 	const sessionIdFromUrl = urlParams.get("session");
 	if (sessionIdFromUrl) {
-		const loaded = await loadSession(sessionIdFromUrl);
+		const loaded = await loadMergedSession(sessionIdFromUrl);
 		if (loaded) return;
 	}
 
 	const storedCurrentSessionId = await storage.settings.get<string>(CURRENT_SESSION_ID_KEY);
 	if (storedCurrentSessionId) {
-		const loaded = await loadSession(storedCurrentSessionId);
+		const loaded = await loadMergedSession(storedCurrentSessionId);
 		if (loaded) return;
 		await setCurrentSessionId(undefined);
 	}
 
+	const localSettings = await localSync.readSettings();
+	if (localSettings?.selectedModel) {
+		await storage.settings.set(SELECTED_MODEL_KEY, localSettings.selectedModel);
+	}
+	if (localSettings?.currentSessionId) {
+		const loaded = await loadMergedSession(localSettings.currentSessionId);
+		if (loaded) return;
+	}
+
 	const latestSessionId = await storage.sessions.getLatestSessionId();
 	if (latestSessionId) {
-		const loaded = await loadSession(latestSessionId);
+		const loaded = await loadMergedSession(latestSessionId);
+		if (loaded) return;
+	}
+
+	const mergedSessions = await getMergedSessions();
+	if (mergedSessions.length > 0) {
+		const loaded = await loadMergedSession(mergedSessions[0].id);
 		if (loaded) return;
 	}
 
@@ -346,22 +411,24 @@ const renderApp = () => {
 						size: "sm",
 						children: icon(History, "sm"),
 						onClick: () => {
-							SessionListDialog.open(
+							LocalSessionListDialog.open(
+								getMergedSessions,
 								async (sessionId) => {
-									await loadSession(sessionId);
+									await loadMergedSession(sessionId);
 								},
 								(deletedSessionId) => {
-									if (deletedSessionId === currentSessionId) {
-										void (async () => {
+									void (async () => {
+										await deleteMergedSession(deletedSessionId);
+										if (deletedSessionId === currentSessionId) {
 											await setCurrentSessionId(undefined);
-											const latestSessionId = await storage.sessions.getLatestSessionId();
-											if (latestSessionId) {
-												const loaded = await loadSession(latestSessionId);
+											const mergedSessions = await getMergedSessions();
+											if (mergedSessions.length > 0) {
+												const loaded = await loadMergedSession(mergedSessions[0].id);
 												if (loaded) return;
 											}
 											await startFreshSession(true);
-										})();
-									}
+										}
+									})();
 								},
 							);
 						},
@@ -390,6 +457,7 @@ const renderApp = () => {
 											if (newTitle && newTitle !== currentTitle && storage.sessions && currentSessionId) {
 												await storage.sessions.updateTitle(currentSessionId, newTitle);
 												currentTitle = newTitle;
+												await saveSession();
 											}
 											isEditingTitle = false;
 											renderApp();
@@ -400,6 +468,7 @@ const renderApp = () => {
 												if (newTitle && newTitle !== currentTitle && storage.sessions && currentSessionId) {
 													await storage.sessions.updateTitle(currentSessionId, newTitle);
 													currentTitle = newTitle;
+													await saveSession();
 												}
 												isEditingTitle = false;
 												renderApp();
@@ -451,7 +520,14 @@ const renderApp = () => {
 						variant: "ghost",
 						size: "sm",
 						children: icon(Settings, "sm"),
-						onClick: () => SettingsDialog.open([new ProvidersModelsTab(), new ProxyTab()]),
+						onClick: () => {
+							const localSyncTab = new LocalSyncSettingsTab();
+							localSyncTab.syncService = localSync;
+							localSyncTab.onChange = () => {
+								renderApp();
+							};
+							SettingsDialog.open([new ProvidersModelsTab(), new ProxyTab(), localSyncTab]);
+						},
 						title: "Settings",
 					})}
 				</div>

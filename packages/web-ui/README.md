@@ -11,6 +11,7 @@ Built with [mini-lit](https://github.com/badlogic/mini-lit) web components and T
 - **Attachments**: PDF, DOCX, XLSX, PPTX, images with preview and text extraction
 - **Artifacts**: Interactive HTML, SVG, Markdown with sandboxed execution
 - **Storage**: IndexedDB-backed storage for sessions, API keys, and settings
+- **Session Persistence Hooks**: `ChatPanel` / `AgentInterface` expose hooks for save-before-send, custom model selection, and app-specific session restore flows
 - **CORS Proxy**: Automatic proxy handling for browser environments
 - **Custom Providers**: Support for Ollama, LM Studio, vLLM, and OpenAI-compatible APIs
 
@@ -23,6 +24,13 @@ npm install @mariozechner/pi-web-ui @mariozechner/pi-agent-core @mariozechner/pi
 ## Quick Start
 
 See the [example](./example) directory for a complete working application.
+
+The library itself provides browser-side storage primitives and UI hooks, but it does not impose a single session persistence policy. The example app demonstrates one concrete policy built on top of these APIs:
+
+- sessions are stored in browser IndexedDB
+- refresh restores the active or latest session
+- the selected model is remembered across sessions
+- optional local directory mirroring can be enabled in browsers that support the File System Access API
 
 ```typescript
 import { Agent } from '@mariozechner/pi-agent-core';
@@ -130,6 +138,9 @@ await chatPanel.setAgent(agent, {
   // Hook before sending messages
   onBeforeSend: async () => { /* save draft, etc. */ },
 
+  // Override the built-in model selector flow
+  onModelSelect: () => { /* persist model selection, open custom dialog, etc. */ },
+
   // Handle cost display click
   onCostClick: () => { /* show cost breakdown */ },
 
@@ -157,6 +168,7 @@ chat.enableModelSelector = true;
 chat.enableThinkingSelector = true;
 chat.onApiKeyRequired = async (provider) => { /* ... */ };
 chat.onBeforeSend = async () => { /* ... */ };
+chat.onModelSelect = () => { /* ... */ };
 ```
 
 Properties:
@@ -165,6 +177,37 @@ Properties:
 - `enableModelSelector`: Show model selector (default: true)
 - `enableThinkingSelector`: Show thinking level selector (default: true)
 - `showThemeToggle`: Show theme toggle (default: false)
+
+Callback hooks:
+- `onApiKeyRequired(provider)`: Prompt for or provide provider credentials
+- `onBeforeSend()`: Persist drafts or session state before calling `prompt()`
+- `onModelSelect()`: Replace the built-in selector flow to persist model changes or restrict selection
+- `onCostClick()`: Show usage or cost breakdown UI
+
+## Session Persistence Patterns
+
+`@mariozechner/pi-web-ui` provides the building blocks for browser-side persistence, but the application decides the policy.
+
+The recommended pattern for robust web apps is:
+
+1. initialize `AppStorage` with a `StorageBackend` such as `IndexedDBStorageBackend`
+2. persist or restore the active session in your app shell, not inside message components
+3. use `onBeforeSend` to create or save a draft session before the first network roundtrip
+4. persist selected model changes explicitly instead of assuming UI-only changes will be restored automatically
+
+The example app in `packages/web-ui/example/` follows this pattern and additionally demonstrates optional local directory mirroring.
+
+## Example App Storage Behavior
+
+The example app is intentionally more opinionated than the library:
+
+- browser IndexedDB remains the operational runtime store
+- the current or most recent session is restored on startup
+- the selected model is persisted and reused for new sessions
+- creating a new session no longer depends on a full page reload
+- optional local directory sync mirrors session JSON files to a user-chosen folder
+
+Local directory sync is implemented in the example app only. It is not part of the shared `StorageBackend` abstraction today.
 
 ### Agent (from pi-agent-core)
 
